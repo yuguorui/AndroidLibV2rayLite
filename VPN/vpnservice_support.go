@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -19,64 +20,111 @@ type protectSet interface {
 	Protect(int) int
 }
 
-type VPNProtectedDialer struct {
-	SupportSet    protectSet
-	DomainName    string
-	PreparedReady bool
-	preparedIPs   []net.IP
-	preparedPort  int
+type resolved struct {
+	IPS   []net.IP
+	Port  int
+	Index int
 }
 
-func (d *VPNProtectedDialer) PrepareDomain() {
-	log.Printf("Preparing Domain: %s", d.DomainName)
-	_host, _port, serr := net.SplitHostPort(d.DomainName)
+func (r *resolved) CurentIP() net.IP {
+	return r.IPS[r.Index]
+}
+
+func (r *resolved) NextIP() {
+	if len(r.IPS) > 0 {
+		r.Index++
+	}
+	if r.Index >= len(r.IPS) {
+		r.Index = 0
+	}
+}
+
+func newResolved(ips []net.IP, port int) *resolved {
+	r := &resolved{
+		IPS:   ips,
+		Port:  port,
+		Index: 0,
+	}
+	return r
+}
+
+func NewPreotectedDialer() *VPNProtectedDialer {
+	d := &VPNProtectedDialer{
+		serverMap: make(map[string]*resolved),
+	}
+	return d
+}
+
+type VPNProtectedDialer struct {
+	currentServer string
+	serverMap     map[string]*resolved
+	SupportSet    protectSet
+}
+
+func (d *VPNProtectedDialer) PrepareDomain(domainName string) {
+	d.currentServer = domainName
+	log.Printf("Preparing Domain: %s", domainName)
+	_host, _port, serr := net.SplitHostPort(domainName)
 	_iport, perr := strconv.Atoi(_port)
 	if serr != nil || perr != nil {
 		log.Printf("PrepareDomain DomainName Err: %v|%v", serr, perr)
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// prefer native lookup on Android
 	r := net.Resolver{PreferGo: false}
 	if addrs, err := r.LookupIPAddr(ctx, _host); err == nil {
 		ips := make([]net.IP, len(addrs))
 		for i, ia := range addrs {
 			ips[i] = ia.IP
 		}
-		d.preparedIPs = ips
-		d.preparedPort = _iport
-		d.PreparedReady = true
-		cancel()
-		log.Printf("Prepare Result:\n Ready: %v\n Domain: %s\n Port: %s\n IPs: %v\n", d.PreparedReady, _host, _port, d.preparedIPs)
+		d.serverMap[domainName] = newResolved(ips, _iport)
+		log.Printf("Prepare Result:\n Domain: %s\n Port: %d\n IPs: %v\n", _host, _iport, ips)
 	} else {
-		log.Printf("PrepareDomain LookupIP Err: %v", err)
+		log.Printf("PrepareDomain LookupIP Err: %v, retrying..", err)
 		time.Sleep(3 * time.Second)
-		go d.PrepareDomain()
+		go d.PrepareDomain(domainName)
 	}
 }
 
 func (d *VPNProtectedDialer) prepareFd(network v2net.Network) (fd int, err error) {
-	if network == v2net.Network_TCP {
+	switch network {
+	case v2net.Network_TCP:
 		fd, err = unix.Socket(unix.AF_INET6, unix.SOCK_STREAM, unix.IPPROTO_TCP)
 		d.SupportSet.Protect(fd)
-	} else if network == v2net.Network_UDP {
+	case v2net.Network_UDP:
 		fd, err = unix.Socket(unix.AF_INET6, unix.SOCK_DGRAM, unix.IPPROTO_UDP)
 		d.SupportSet.Protect(fd)
-	} else {
+	default:
 		err = fmt.Errorf("unknow network")
 	}
 	return
 }
 
-func (d VPNProtectedDialer) Dial(ctx context.Context, src v2net.Address, dest v2net.Destination, sockopt *v2internet.SocketConfig) (net.Conn, error) {
+func (d VPNProtectedDialer) Dial(ctx context.Context,
+	src v2net.Address,
+	dest v2net.Destination, sockopt *v2internet.SocketConfig) (net.Conn, error) {
 	network := dest.Network.SystemString()
 	Address := dest.NetAddr()
 
-	if Address == d.DomainName && d.PreparedReady {
-		ip := d.preparedIPs[rand.Intn(len(d.preparedIPs))]
-		if fd, err := d.prepareFd(dest.Network); err == nil {
-			return d.fdConn(ctx, ip, d.preparedPort, fd)
+	// lookup v2ray server cache
+	if res, ok := d.serverMap[Address]; ok {
+		if Address == d.currentServer {
+			if fd, err := d.prepareFd(dest.Network); err == nil {
+				conn, err := d.fdConn(ctx, res.CurentIP(), res.Port, fd)
+				if err != nil {
+					if strings.Index(err.Error(), "unreachable") > 0 {
+						res.NextIP()
+					}
+				}
+				return conn, err
+			} else {
+				return nil, err
+			}
 		} else {
-			return nil, err
+			return nil, fmt.Errorf("current server changed, fast shutting down old conns")
 		}
 	}
 
@@ -127,7 +175,7 @@ func (d VPNProtectedDialer) fdConn(ctx context.Context, ip net.IP, port int, fd 
 	file := os.NewFile(uintptr(fd), "Socket")
 	conn, err := net.FileConn(file)
 	if err != nil {
-		log.Printf("fdConn FileConn Close Fd: %d Err: %v: %d", fd, err)
+		log.Printf("fdConn FileConn Close Fd: %d Err: %v", fd, err)
 		file.Close()
 		unix.Close(fd)
 		return nil, err
