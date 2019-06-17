@@ -34,10 +34,11 @@ type V2RayPoint struct {
 	SupportSet   V2RayVPNServiceSupportsSet
 	statsManager v2stats.Manager
 
-	dialer   *VPN.VPNProtectedDialer
-	status   *CoreI.Status
-	escorter *Escort.Escorting
-	v2rayOP  *sync.Mutex
+	dialer    *VPN.ProtectedDialer
+	status    *CoreI.Status
+	escorter  *Escort.Escorting
+	v2rayOP   *sync.Mutex
+	closeChan chan struct{}
 
 	PackageName          string
 	DomainName           string
@@ -66,6 +67,8 @@ func (v *V2RayPoint) RunLoop() (err error) {
 	v.dialer.SupportSet = v.SupportSet
 
 	if !v.status.IsRunning {
+		v.closeChan = make(chan struct{})
+		go v.dialer.PrepareDomain(v.DomainName, v.closeChan)
 		err = v.pointloop()
 	}
 	return
@@ -77,6 +80,7 @@ func (v *V2RayPoint) StopLoop() (err error) {
 	v.v2rayOP.Lock()
 	defer v.v2rayOP.Unlock()
 	if v.status.IsRunning {
+		close(v.closeChan)
 		v.shutdownInit()
 		v.SupportSet.Shutdown()
 		v.SupportSet.OnEmitStatus(0, "Closed")
@@ -120,7 +124,6 @@ func (v *V2RayPoint) shutdownInit() {
 }
 
 func (v *V2RayPoint) pointloop() error {
-	go v.dialer.PrepareDomain(v.DomainName)
 	if err := v.runTun2socks(); err != nil {
 		log.Println(err)
 		return err
