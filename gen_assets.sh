@@ -12,7 +12,7 @@ __base="$(basename ${__file} .sh)"
 
 DATADIR=${__dir}/data
 
-gen_assets() {
+compile_dat () {
     local TMPDIR=$(mktemp -d)
 
     trap 'echo -e "Aborted, error $? in command: $BASH_COMMAND"; rm -rf $TMPDIR; trap ERR; exit 1' ERR
@@ -59,4 +59,23 @@ gen_assets() {
     return 0
 }
 
-gen_assets
+
+download_dat () {
+    wget -qO - https://api.github.com/repos/v2ray/geoip/releases/latest \
+    | grep browser_download_url | cut -d '"' -f 4 \
+    | wget -i - -O $DATADIR/geoip.dat
+
+    wget -qO - https://api.github.com/repos/v2ray/domain-list-community/releases/latest \
+    | grep browser_download_url | cut -d '"' -f 4 \
+    | wget -i - -O $DATADIR/geosite.dat
+}
+
+ACTION="${1:-}"
+if [[ -z $ACTION ]]; then
+    ACTION=download
+fi
+
+case $ACTION in
+    "download") download_dat;;
+    "compile") compile_dat;;
+esac
