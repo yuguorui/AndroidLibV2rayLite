@@ -21,9 +21,51 @@ type protectSet interface {
 }
 
 type resolved struct {
-	domain string
-	IPs    []net.IP
-	Port   int
+	domain       string
+	IPs          []net.IP
+	Port         int
+	ipIdx        uint8
+	ipLock       sync.Mutex
+	lastSwitched time.Time
+}
+
+// NextIP switch to another resolved result.
+// there still be race-condition here if multiple err concurently occured
+// may cause idx keep switching,
+// but that's an outside error can hardly handled here
+func (r *resolved) NextIP() {
+	r.ipLock.Lock()
+	defer r.ipLock.Unlock()
+
+	if len(r.IPs) > 1 {
+
+		// throttle, don't switch too quickly
+		now := time.Now()
+		if now.Sub(r.lastSwitched) < time.Second*5 {
+			log.Println("switch too quickly")
+			return
+		}
+		r.lastSwitched = now
+		r.ipIdx++
+
+	} else {
+		return
+	}
+
+	if r.ipIdx >= uint8(len(r.IPs)) {
+		r.ipIdx = 0
+	}
+
+	cur := r.currentIP()
+	log.Printf("switched to next IP: %s", cur)
+}
+
+func (r *resolved) currentIP() net.IP {
+	if len(r.IPs) > 0 {
+		return r.IPs[r.ipIdx]
+	}
+
+	return nil
 }
 
 // NewPreotectedDialer ...
@@ -39,33 +81,8 @@ type ProtectedDialer struct {
 	currentServer string
 	resolveChan   chan struct{}
 
-	IPs    []net.IP
-	port   int
-	ipIdx  uint8
-	ipLock sync.Mutex
-
+	vServer    *resolved
 	SupportSet protectSet
-}
-
-// NextIP switch to another resolved result.
-// there still be race-condition here if multiple err concurently occured
-// may cause idx keep switching,
-// but that's an outside error can hardly handled here
-func (d *ProtectedDialer) NextIP() {
-	d.ipLock.Lock()
-	defer d.ipLock.Unlock()
-
-	if len(d.IPs) > 1 {
-		d.ipIdx++
-	} else {
-		return
-	}
-
-	if d.ipIdx >= uint8(len(d.IPs)) {
-		d.ipIdx = 0
-	}
-	cur := d.currentIP()
-	log.Printf("switched to next IP: %s", cur)
 }
 
 func (d *ProtectedDialer) lookupAddr(Address string) (*resolved, error) {
@@ -127,19 +144,11 @@ func (d *ProtectedDialer) PrepareDomain(domainName string, closeCh <-chan struct
 			continue
 		}
 
-		d.IPs = resolved.IPs
-		d.port = resolved.Port
-		log.Printf("Prepare Result:\n Domain: %s\n Port: %d\n IPs: %v\n", resolved.domain, d.port, d.IPs)
+		d.vServer = resolved
+		log.Printf("Prepare Result:\n Domain: %s\n Port: %d\n IPs: %v\n",
+			resolved.domain, resolved.Port, resolved.IPs)
 		return
 	}
-}
-
-func (d *ProtectedDialer) currentIP() net.IP {
-	if len(d.IPs) > 0 {
-		return d.IPs[d.ipIdx]
-	}
-
-	return nil
 }
 
 func (d *ProtectedDialer) getFd(network v2net.Network) (fd int, err error) {
@@ -165,14 +174,12 @@ func (d *ProtectedDialer) Dial(ctx context.Context,
 	// try to connect fixed IP if multiple IP parsed from domain,
 	// and switch to next IP if error occurred
 	if strings.Compare(Address, d.currentServer) == 0 {
-		if len(d.IPs) == 0 {
+		if d.vServer == nil {
 			log.Println("Dial pending prepare  ...", Address)
 			<-d.resolveChan
 		}
 
-		curIP := d.currentIP()
-
-		if curIP == nil {
+		if d.vServer == nil {
 			// shoud not happeded
 			return nil, fmt.Errorf("fail to prepare domain %s", d.currentServer)
 		}
@@ -182,9 +189,10 @@ func (d *ProtectedDialer) Dial(ctx context.Context,
 			return nil, err
 		}
 
-		conn, err := d.fdConn(ctx, curIP, d.port, fd)
+		curIP := d.vServer.currentIP()
+		conn, err := d.fdConn(ctx, curIP, d.vServer.Port, fd)
 		if err != nil {
-			d.NextIP()
+			d.vServer.NextIP()
 			return nil, err
 		}
 		log.Printf("Using Prepared: %s", curIP)

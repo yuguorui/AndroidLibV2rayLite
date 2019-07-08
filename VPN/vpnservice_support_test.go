@@ -33,13 +33,9 @@ func TestProtectedDialer_PrepareDomain(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			go d.PrepareDomain(tt.args.domainName, ch)
 
-			t.Log(d.currentIP())
-			go d.NextIP()
-			go d.NextIP()
-			go d.NextIP()
 			time.Sleep(time.Second)
-			go d.NextIP()
-			t.Log(d.currentIP())
+			go d.vServer.NextIP()
+			t.Log(d.vServer.currentIP())
 		})
 	}
 
@@ -54,17 +50,14 @@ func (f fakeSupportSet) Protect(int) int {
 
 func TestProtectedDialer_Dial(t *testing.T) {
 
-	d := NewPreotectedDialer()
-	d.SupportSet = fakeSupportSet{}
-
 	tests := []struct {
 		name    string
 		wantErr bool
 	}{
 		// TODO: Add test cases.
 		{"baidu.com:80", false},
-		// {"cloudflare.com:80", false},
-		// {"172.16.192.11:80", true},
+		{"cloudflare.com:80", false},
+		{"172.16.192.11:80", true},
 		// {"172.16.192.10:80", true},
 		// {"[2fff:4322::1]:443", true},
 		// {"[fc00::1]:443", true},
@@ -72,6 +65,11 @@ func TestProtectedDialer_Dial(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ch := make(chan struct{})
+
+			d := NewPreotectedDialer()
+			d.SupportSet = fakeSupportSet{}
+			d.currentServer = tt.name
+
 			go d.PrepareDomain(tt.name, ch)
 
 			var wg sync.WaitGroup
@@ -102,6 +100,53 @@ func TestProtectedDialer_Dial(t *testing.T) {
 			}
 
 			wg.Wait()
+		})
+	}
+}
+
+func Test_resolved_NextIP(t *testing.T) {
+	type fields struct {
+		domain string
+		IPs    []net.IP
+		Port   int
+	}
+	tests := []struct {
+		name   string
+		fields fields
+	}{
+		// TODO: Add test cases.
+		{"test1",
+			fields{
+				domain: "www.baidu.com",
+				IPs: []net.IP{
+					net.ParseIP("1.2.3.4"),
+					net.ParseIP("4.3.2.1"),
+					net.ParseIP("1234::1"),
+					net.ParseIP("4321::1"),
+				},
+			}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := &resolved{
+				domain: tt.fields.domain,
+				IPs:    tt.fields.IPs,
+				Port:   tt.fields.Port,
+			}
+			t.Logf("%v", r.IPs)
+			t.Logf("%v", r.currentIP())
+			r.NextIP()
+			t.Logf("%v", r.currentIP())
+			r.NextIP()
+			t.Logf("%v", r.currentIP())
+			r.NextIP()
+			t.Logf("%v", r.currentIP())
+			time.Sleep(3 * time.Second)
+			r.NextIP()
+			t.Logf("%v", r.currentIP())
+			time.Sleep(5 * time.Second)
+			r.NextIP()
+			t.Logf("%v", r.currentIP())
 		})
 	}
 }
