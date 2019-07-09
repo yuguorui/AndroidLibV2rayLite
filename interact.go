@@ -64,11 +64,26 @@ func (v *V2RayPoint) RunLoop() (err error) {
 	defer v.v2rayOP.Unlock()
 	//Construct Context
 	v.status.PackageName = v.PackageName
-	v.dialer.SupportSet = v.SupportSet
 
 	if !v.status.IsRunning {
 		v.closeChan = make(chan struct{})
 		go v.dialer.PrepareDomain(v.DomainName, v.closeChan)
+		go func() {
+			select {
+			// wait until resolved
+			case <-v.dialer.ResolveChan():
+				// shutdown VPNService if server name can not reolved
+				if !v.dialer.IsVServerReady() {
+					log.Println("vServer cannot resolved, shutdown")
+					v.StopLoop()
+					v.SupportSet.Shutdown()
+				}
+
+			// stop waiting if manually closed
+			case <-v.closeChan:
+			}
+		}()
+
 		err = v.pointloop()
 	}
 	return
@@ -82,11 +97,7 @@ func (v *V2RayPoint) StopLoop() (err error) {
 	if v.status.IsRunning {
 		close(v.closeChan)
 		v.shutdownInit()
-		v.SupportSet.Shutdown()
 		v.SupportSet.OnEmitStatus(0, "Closed")
-	}
-	if err != nil {
-		log.Println(err)
 	}
 	return
 }
@@ -194,16 +205,17 @@ func TestConfig(ConfigureFileContent string) error {
 }
 
 /*NewV2RayPoint new V2RayPoint*/
-func NewV2RayPoint() *V2RayPoint {
+func NewV2RayPoint(s V2RayVPNServiceSupportsSet) *V2RayPoint {
 	initV2Env()
-	dialer := VPN.NewPreotectedDialer()
+	dialer := VPN.NewPreotectedDialer(s)
 	v2internet.UseAlternativeSystemDialer(dialer)
 	status := &CoreI.Status{}
 	return &V2RayPoint{
-		v2rayOP:  new(sync.Mutex),
-		status:   status,
-		dialer:   dialer,
-		escorter: &Escort.Escorting{Status: status},
+		SupportSet: s,
+		v2rayOP:    new(sync.Mutex),
+		status:     status,
+		dialer:     dialer,
+		escorter:   &Escort.Escorting{Status: status},
 	}
 }
 

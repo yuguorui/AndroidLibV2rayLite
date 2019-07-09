@@ -69,9 +69,11 @@ func (r *resolved) currentIP() net.IP {
 }
 
 // NewPreotectedDialer ...
-func NewPreotectedDialer() *ProtectedDialer {
+func NewPreotectedDialer(p protectSet) *ProtectedDialer {
 	d := &ProtectedDialer{
 		resolveChan: make(chan struct{}),
+		resolver:    &net.Resolver{PreferGo: false},
+		protectSet:  p,
 	}
 	return d
 }
@@ -81,8 +83,18 @@ type ProtectedDialer struct {
 	currentServer string
 	resolveChan   chan struct{}
 
-	vServer    *resolved
-	SupportSet protectSet
+	vServer  *resolved
+	resolver *net.Resolver
+
+	protectSet
+}
+
+func (d *ProtectedDialer) IsVServerReady() bool {
+	return (d.vServer != nil)
+}
+
+func (d *ProtectedDialer) ResolveChan() <-chan struct{} {
+	return d.resolveChan
 }
 
 func (d *ProtectedDialer) lookupAddr(Address string) (*resolved, error) {
@@ -100,8 +112,7 @@ func (d *ProtectedDialer) lookupAddr(Address string) (*resolved, error) {
 	defer cancel()
 
 	// prefer native lookup on Android
-	r := net.Resolver{PreferGo: false}
-	addrs, err := r.LookupIPAddr(ctx, host)
+	addrs, err := d.resolver.LookupIPAddr(ctx, host)
 	if err != nil {
 		return nil, err
 	}
@@ -131,9 +142,17 @@ func (d *ProtectedDialer) PrepareDomain(domainName string, closeCh <-chan struct
 	defer close(d.resolveChan)
 	d.currentServer = domainName
 
+	maxRetry := 10
+
 	for {
+		if maxRetry == 0 {
+			log.Println("PrepareDomain maxRetry reached. exiting.")
+			return
+		}
+
 		resolved, err := d.lookupAddr(domainName)
 		if err != nil {
+			maxRetry--
 			log.Printf("PrepareDomain err: %v\n", err)
 			select {
 			case <-closeCh:
@@ -180,7 +199,8 @@ func (d *ProtectedDialer) Dial(ctx context.Context,
 		}
 
 		if d.vServer == nil {
-			// shoud not happeded
+			// user close connection during PrepareDomain,
+			// fast return release resources.
 			return nil, fmt.Errorf("fail to prepare domain %s", d.currentServer)
 		}
 
@@ -199,7 +219,7 @@ func (d *ProtectedDialer) Dial(ctx context.Context,
 		return conn, nil
 	}
 
-	// v2ray connecting to "domestic" servers, won't cache
+	// v2ray connecting to "domestic" servers, no caching results
 	log.Printf("Not Using Prepared: %s,%s", network, Address)
 	resolved, err := d.lookupAddr(Address)
 	if err != nil {
@@ -210,13 +230,17 @@ func (d *ProtectedDialer) Dial(ctx context.Context,
 	if err != nil {
 		return nil, err
 	}
+
+	// only use the first resolved address.
+	// the result may vary, eg: IPv6 addrs comes first if
+	// client has ipv6 address
 	return d.fdConn(ctx, resolved.IPs[0], resolved.Port, fd)
 }
 
 func (d *ProtectedDialer) fdConn(ctx context.Context, ip net.IP, port int, fd int) (net.Conn, error) {
 
 	// call android VPN service to "protect" the fd connecting straight out
-	d.SupportSet.Protect(fd)
+	d.Protect(fd)
 
 	sa := &unix.SockaddrInet6{
 		Port: port,
