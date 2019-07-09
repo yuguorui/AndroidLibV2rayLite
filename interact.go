@@ -119,13 +119,6 @@ func (v V2RayPoint) QueryStats(tag string, direct string) int64 {
 	return counter.Set(0)
 }
 
-func (v V2RayPoint) protectFd(network, address string, fd uintptr) error {
-	if ret := v.SupportSet.Protect(int(fd)); ret != 0 {
-		return fmt.Errorf("protectFd: fail to protect")
-	}
-	return nil
-}
-
 func (v *V2RayPoint) shutdownInit() {
 	v.status.IsRunning = false
 	v.status.Vpoint.Close()
