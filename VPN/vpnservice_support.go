@@ -6,7 +6,6 @@ import (
 	"log"
 	"net"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -72,8 +71,10 @@ func (r *resolved) currentIP() net.IP {
 func NewPreotectedDialer(p protectSet) *ProtectedDialer {
 	d := &ProtectedDialer{
 		resolveChan: make(chan struct{}),
-		resolver:    &net.Resolver{PreferGo: false},
-		protectSet:  p,
+
+		// prefer native lookup on Android
+		resolver:   &net.Resolver{PreferGo: false},
+		protectSet: p,
 	}
 	return d
 }
@@ -97,27 +98,34 @@ func (d *ProtectedDialer) ResolveChan() <-chan struct{} {
 	return d.resolveChan
 }
 
-func (d *ProtectedDialer) lookupAddr(Address string) (*resolved, error) {
-	log.Println("lookup addr: ", Address)
+// simplicated version of golang: internetAddrList in src/net/ipsock.go
+func (d *ProtectedDialer) lookupAddr(addr string) (*resolved, error) {
 
-	host, port, serr := net.SplitHostPort(Address)
-	_iport, perr := strconv.Atoi(port)
-	if serr != nil || perr != nil {
-		err := fmt.Errorf("%v\n%v", serr, perr)
-		log.Printf("PrepareDomain DomainName Err: %v", err)
-		return nil, err
-	}
+	var (
+		err        error
+		host, port string
+		portnum    int
+	)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// prefer native lookup on Android
+	if host, port, err = net.SplitHostPort(addr); err != nil {
+		log.Printf("PrepareDomain SplitHostPort Err: %v", err)
+		return nil, err
+	}
+
+	if portnum, err = d.resolver.LookupPort(ctx, "tcp", port); err != nil {
+		log.Printf("PrepareDomain LookupPort Err: %v", err)
+		return nil, err
+	}
+
 	addrs, err := d.resolver.LookupIPAddr(ctx, host)
 	if err != nil {
 		return nil, err
 	}
 	if len(addrs) == 0 {
-		return nil, fmt.Errorf("domain %s Failed to resolve", Address)
+		return nil, fmt.Errorf("domain %s Failed to resolve", addr)
 	}
 
 	IPs := make([]net.IP, len(addrs))
@@ -128,7 +136,7 @@ func (d *ProtectedDialer) lookupAddr(Address string) (*resolved, error) {
 	rs := &resolved{
 		domain: host,
 		IPs:    IPs,
-		Port:   _iport,
+		Port:   portnum,
 	}
 
 	return rs, nil
@@ -136,14 +144,11 @@ func (d *ProtectedDialer) lookupAddr(Address string) (*resolved, error) {
 
 // PrepareDomain caches direct v2ray server host
 func (d *ProtectedDialer) PrepareDomain(domainName string, closeCh <-chan struct{}) {
-
 	log.Printf("Preparing Domain: %s", domainName)
-
-	defer close(d.resolveChan)
 	d.currentServer = domainName
 
+	defer close(d.resolveChan)
 	maxRetry := 10
-
 	for {
 		if maxRetry == 0 {
 			log.Println("PrepareDomain maxRetry reached. exiting.")
