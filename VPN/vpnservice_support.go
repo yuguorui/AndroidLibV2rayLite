@@ -201,12 +201,12 @@ func (d *ProtectedDialer) Dial(ctx context.Context,
 		if d.vServer == nil {
 			log.Println("Dial pending prepare  ...", Address)
 			<-d.resolveChan
-		}
 
-		if d.vServer == nil {
-			// user close connection during PrepareDomain,
+			// user may close connection during PrepareDomain,
 			// fast return release resources.
-			return nil, fmt.Errorf("fail to prepare domain %s", d.currentServer)
+			if d.vServer == nil {
+				return nil, fmt.Errorf("fail to prepare domain %s", d.currentServer)
+			}
 		}
 
 		fd, err := d.getFd(dest.Network)
