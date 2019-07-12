@@ -20,6 +20,9 @@ import (
 	v2serial "v2ray.com/core/infra/conf/serial"
 	_ "v2ray.com/core/main/distro/all"
 	v2internet "v2ray.com/core/transport/internet"
+
+	v2applog "v2ray.com/core/app/log"
+	v2commlog "v2ray.com/core/common/log"
 )
 
 const (
@@ -200,6 +203,14 @@ func TestConfig(ConfigureFileContent string) error {
 /*NewV2RayPoint new V2RayPoint*/
 func NewV2RayPoint(s V2RayVPNServiceSupportsSet) *V2RayPoint {
 	initV2Env()
+
+	// inject our own log writer
+	v2applog.RegisterHandlerCreator(v2applog.LogType_Console,
+		func(lt v2applog.LogType,
+			options v2applog.HandlerCreatorOptions) (v2commlog.Handler, error) {
+			return v2commlog.NewLogger(createStdoutLogWriter()), nil
+		})
+
 	dialer := VPN.NewPreotectedDialer(s)
 	v2internet.UseAlternativeSystemDialer(dialer)
 	status := &CoreI.Status{}
