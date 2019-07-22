@@ -2,6 +2,7 @@ package VPN
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -236,13 +237,14 @@ func (d *ProtectedDialer) Dial(ctx context.Context,
 		return nil, err
 	}
 
-	// only use the first resolved address.
-	// the result may vary, eg: IPv6 addrs comes first if
-	// client has ipv6 address
+	// use the first resolved address.
+	// the result IP may vary, eg: IPv6 addrs comes first if client has ipv6 address
 	return d.fdConn(ctx, resolved.IPs[0], resolved.Port, fd)
 }
 
 func (d *ProtectedDialer) fdConn(ctx context.Context, ip net.IP, port int, fd int) (net.Conn, error) {
+
+	defer unix.Close(fd)
 
 	// call android VPN service to "protect" the fd connecting straight out
 	d.Protect(fd)
@@ -254,28 +256,22 @@ func (d *ProtectedDialer) fdConn(ctx context.Context, ip net.IP, port int, fd in
 
 	if err := unix.Connect(fd, sa); err != nil {
 		log.Printf("fdConn unix.Connect err, Close Fd: %d Err: %v", fd, err)
-		unix.Close(fd)
 		return nil, err
 	}
 
 	file := os.NewFile(uintptr(fd), "Socket")
+	if file == nil {
+		// returned value will be nil if fd is not a valid file descriptor
+		return nil, errors.New("fdConn fd invalid")
+	}
+
+	defer file.Close()
+	//Closing conn does not affect file, and closing file does not affect conn.
 	conn, err := net.FileConn(file)
 	if err != nil {
 		log.Printf("fdConn FileConn Close Fd: %d Err: %v", fd, err)
-		file.Close()
-		unix.Close(fd)
 		return nil, err
 	}
-
-	go func() {
-		// wait context until cancel
-		// clean up fd
-		<-ctx.Done()
-
-		file.Close()
-		unix.Close(fd)
-		return
-	}()
 
 	return conn, nil
 }
