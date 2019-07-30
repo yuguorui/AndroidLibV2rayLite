@@ -2,7 +2,7 @@ pb:
 	  go get -u github.com/golang/protobuf/protoc-gen-go
 		@echo "pb Start"
 asset:
-	bash gen_assets.sh download
+	# bash gen_assets.sh download
 	mkdir assets
 	cp -v data/*.dat assets/
 	# cd assets;curl https://raw.githubusercontent.com/2dust/AndroidLibV2rayLite/master/data/geosite.dat > geosite.dat		
